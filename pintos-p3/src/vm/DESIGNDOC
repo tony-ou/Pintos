@@ -1,0 +1,289 @@
+       	       	    +---------------------------+
+		    |		CS 140		|
+		    | PROJECT 3: VIRTUAL MEMORY	|
+		    |	   DESIGN DOCUMENT	|
+		    +---------------------------+
+
+---- GROUP ----
+
+>> Fill in the names and email addresses of your group members.
+
+Yushi Hu <hys98@uchicago.edu>
+Yiyang Ou <yiyangou@uchicago.edu>
+
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, or extra credit, please give them here.
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+
+			PAGE TABLE MANAGEMENT
+			=====================
+
+---- DATA STRUCTURES ----
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+In page.h:
+
+/*page table data structure*/
+static struct page
+{
+	void *addr; //user virtual address, always with page offset 0
+	struct frame *frame; //mapped frame
+	struct thread *thread; //the thread that owns this page
+	bool read_only; //whether or not read only
+
+	struct hash_elem hash_elem; // Hash table element
+
+	struct file *file;          // corresponding file
+	off_t file_ofs;          // file offset
+	off_t file_size;         // size of file in the page
+
+	block_sector_t sector;       /* Start sector for swap slot; -1 if not having a swap slot. */
+
+	bool swap;  // true is swap, false is file
+};
+
+In frame.h:
+/* frame data structure */
+static struct frame 
+{
+	void *base; //kernel vir address
+	struct page *page; //corresponding process page
+	struct lock lock; // lock the frame
+};
+
+In thread.h:
+    /* suppplement page table */
+    struct hash *page_table;
+
+---- ALGORITHMS ----
+
+>> A2: In a few paragraphs, describe your code for locating the frame,
+>> if any, that contains the data of a given page.
+
+Each frame is wrapped in a page data structure. Each thread maintains a 
+page table that contains all the pages. Each page
+is identified with the base address of it. When locating a frame, the adress
+will be round down to base address, and then OS will try to find the hash 
+entry with this address. So that the page can be located.
+
+If the data is a file or a mapping file, each thread maintains a list of 
+mappings. Looping through the list the OS can find the mapping.
+
+>> A3: How does your code coordinate accessed and dirty bits between
+>> kernel and user virtual addresses that alias a single frame, or
+>> alternatively how do you avoid the issue?
+
+The problem is avoided since access bits and dirty bits and stored only in one
+place, associated with virtual address. Kernel also mostly work on virtual address. 
+ When accessing data, the kernel will first check whether the
+virtual address is valid, and then access it. So there is no problem in coordinate
+accessed bit.
+
+For dirty bit, the thread also maintain a list of pagedir. By the user virtual 
+address, the thread can find its pagedir, then determine whether it is dirty.
+
+---- SYNCHRONIZATION ----
+
+>> A4: When two user processes both need a new frame at the same time,
+>> how are races avoided?
+
+there is a scan lock that protect finding new frame. Only one thread can loop through 
+the frames at one moment. The lock won't be released until a new frame is assigned to 
+the process. So the race is avoided.
+
+---- RATIONALE ----
+
+>> A5: Why did you choose the data structure(s) that you did for
+>> representing virtual-to-physical mappings?
+
+We choose this design because this is simple. Each physical frame is associated with a 
+supplemental page. This level of indirection separte physical and virtual address. Besides
+this layer, all the informations and access are stored in the page structure, which means
+that kernel only needs to deal with virtual address. This design avoid all the difficulties
+in transfer between physical and virtual addresses and can easily detect bad access. 
+
+
+		       PAGING TO AND FROM DISK
+		       =======================
+
+---- DATA STRUCTURES ----
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+1. page.h: 
+
+static struct page
+{
+	block_sector_t sector;       /* Start sector for swap slot; -1 if not having a swap slot. */
+	bool swap;  // true is swap, false is file
+}
+
+2. thread.h:
+struct thread
+{
+ 	// stack pointer location
+ 	void *esp;
+}
+
+---- ALGORITHMS ----
+
+>> B2: When a frame is required but none is free, some frame must be
+>> evicted.  Describe your code for choosing a frame to evict.
+
+We use two functions frame_alloc_and_lock & try_frame_alloc_and_lock. frame_alloc_and_lock wraps around try_frame_alloc_and_lock and retries it for two times. Inside, try_frame_alloc_and_lock, we loop through frame table twice and check a frame is locked. If not, we check if it is recently accessed, and if yes, we clear this. And if we meet a frame not locked and not recently accessed, then it is a victim page. Note in this way, we give page second chance.
+
+>> B3: When a process P obtains a frame that was previously used by a
+>> process Q, how do you adjust the page table (and any other data
+>> structures) to reflect the frame Q no longer has?
+We set the Q's page->frame to NULL and change the frame->page to P's page. And call page-out to write P's content to file or swap space depending on P's page->swap and if it's dirty or not.
+
+>> B4: Explain your heuristic for deciding whether a page fault for an
+>> invalid virtual address should cause the stack to be extended into
+>> the page that faulted.
+We first try to locate the page in process's page table through hash. If we can't find it, we then check if (t->esp - 32) <= address. If so, this means we haven't allocated the stack page (and it's a valida access), we need to increase the stack to allocate that page.
+
+
+---- SYNCHRONIZATION ----
+
+>> B5: Explain the basics of your VM synchronization design.  In
+>> particular, explain how it prevents deadlock.  (Refer to the
+>> textbook for an explanation of the necessary conditions for
+>> deadlock.)
+We use a lock inside frame struct to lock that frame such as when entering a syscall and preventing page-fault in kernel. And we use scan_lock to lock the access to frame_table (an array) and swap lock to lock access to bitmap. We acquire lock only when necessary and release it immediately after completing operation or exiting due to error. we minimize the critical section only to those necessary to be protected and the simplicity of locks (one lock for each purpose) prevents deadlock.
+
+
+>> B6: A page fault in process P can cause another process Q's frame
+>> to be evicted.  How do you ensure that Q cannot access or modify
+>> the page during the eviction process?  How do you avoid a race
+>> between P evicting Q's frame and Q faulting the page back in?
+
+We use frame->lock to protected the these operations on frames. The kernel  will hold the lock before trying to modify or access page during eviction process
+and release it after completion. So we avoid race. 
+
+>> B7: Suppose a page fault in process P causes a page to be read from
+>> the file system or swap.  How do you ensure that a second process Q
+>> cannot interfere by e.g. attempting to evict the frame while it is
+>> still being read in?
+As mentioned in B6, we use frame->lock to protect P's frame, so that 
+Q can't interfere with it.
+
+>> B8: Explain how you handle access to paged-out pages that occur
+>> during system calls.  Do you use page faults to bring in pages (as
+>> in user programs), or do you have a mechanism for "locking" frames
+>> into physical memory, or do you use some other design?  How do you
+>> gracefully handle attempted accesses to invalid virtual addresses?
+We lock frames into memory. We use copy_in_string/copy_in (which calls page_lock automatically)  on syscall's arguments and manually call page_lock such as during sys_write/sys_read to prevent kernel page fault. To gracefully handle invalid attemp, we can sys_exit to terminate the user process rather than throwing an error inside kernel.
+
+---- RATIONALE ----
+
+>> B9: A single lock for the whole VM system would make
+>> synchronization easy, but limit parallelism.  On the other hand,
+>> using many locks complicates synchronization and raises the
+>> possibility for deadlock but allows for high parallelism.  Explain
+>> where your design falls along this continuum and why you chose to
+>> design it this way.
+We go for a middle ground, i.e. we have a lock for each specific purpsoe but 
+at the same time minize the lock numbers by grouping logics together. For example, as mentiomed before we use swap_lock/scan_lock. But we have a lock for each frame as a struct member, yet we treat every frame's lock equally and so have same code logic for each ,simplifying the complexity of our codes. So we achieve high parall and avoiding deadlock simultaneously.
+
+			 MEMORY MAPPED FILES
+			 ===================
+
+---- DATA STRUCTURES ----
+
+>> C1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+In syscall.c:
+
+/* Binds a mapping id to a region of memory and a file. */
+struct mapping
+{
+  struct list_elem elem;      /* List element. */
+  int handle;                 /* Mapping id. */
+  struct file *file;          /* File. */
+  uint8_t *base;              /* Start of memory mapping. */
+  size_t page_cnt;            /* Number of pages mapped. */
+};
+
+In thread.h:
+// mapping files
+struct list mappings; 
+
+---- ALGORITHMS ----
+
+>> C2: Describe how memory mapped files integrate into your virtual
+>> memory subsystem.  Explain how the page fault and eviction
+>> processes differ between swap pages and other pages.
+
+In page fault, the mmap file behaves similarly to other files. File
+is read from the disk and put in the memory. The only difference is
+that after allocating a page the mmap file should be read in the page.
+The main difference is that in page eviction, unmap, syscall exit, 
+the mmap file must be written back to the original file, 
+while swap pages will just be freed. 
+
+>> C3: Explain how you determine whether a new file mapping overlaps
+>> any existing segment.
+
+The file is mapped to separate pages, not continuous space. So the 
+kernel only need to ensure that the newly allocated pages do not 
+overlap with existing segments. This is achieved by the page hash
+table maintained by the thread. The thread won't allow a new page 
+allocated to an exisiting address. So the newly allocated pages 
+won't overlap with old ones, and the file mapping won't overlap.
+
+
+
+---- RATIONALE ----
+
+>> C4: Mappings created with "mmap" have similar semantics to those of
+>> data demand-paged from executables, except that "mmap" mappings are
+>> written back to their original files, not to swap.  This implies
+>> that much of their implementation can be shared.  Explain why your
+>> implementation either does or does not share much of the code for
+>> the two situations.
+
+My implementation shares a lot. There is a universal unmap function for 
+all the write backs of mmap files. There is a field in the page 
+data structure to determine the file type. So, in most of the functions, 
+the codes are shared. Sometimes when there is possibility of written back,
+I only need an if condition and the unmap function to perform necessary 
+written back for mmap files. I choose this design because most operations 
+are the same, there is no other concerns to share the code together.
+
+			   SURVEY QUESTIONS
+			   ================
+
+Answering these questions is optional, but it will help us improve the
+course in future quarters.  Feel free to tell us anything you
+want--these questions are just to spur your thoughts.  You may also
+choose to respond anonymously in the course evaluations at the end of
+the quarter.
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+
+>> Is there some particular fact or hint we should give students in
+>> future quarters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students, either for future quarters or the remaining projects?
+
+>> Any other comments?
+
